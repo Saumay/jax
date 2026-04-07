@@ -71,7 +71,7 @@ from jax._src.pallas.mosaic import random as pl_random
 from jax._src.pallas.mosaic import tpu_info
 from jax._src.state import indexing
 from jax._src.state import primitives as state_primitives
-from jax._src.state.types import BitcastTransform, ReshapeTransform
+from jax._src.state import types as state_types
 from jax._src.typing import Array, DTypeLike
 from jax._src.util import foreach
 from jax._src.util import safe_map
@@ -112,6 +112,10 @@ zip, unsafe_zip = safe_zip, zip
 
 # Extended types that should not be converted to physical types in lowering.
 PHYSICAL_EXTENDED_DTYPES = {pallas_core.semaphore_dtype}
+
+_dma_unflatten = tpu_primitives._dma_unflatten
+_get_ref_and_transforms = tpu_primitives._get_ref_and_transforms
+_dma_tree_leaves = tpu_primitives._dma_tree_leaves
 
 
 # TODO(slebedev): Make this a TypeIs function, once we migrate to Pyrefly.
@@ -1576,7 +1580,7 @@ def _slice_memref(
 
 def _bitcast_memref(
     ref: ir.Value,
-    bitcaster: BitcastTransform,
+    bitcaster: state_types.BitcastTransform,
     ref_aval: state.AbstractRef,
     ref_block_shape: tuple[int | pallas_core.Squeezed, ...],
 ) -> tuple[ir.Value, tuple[int | pallas_core.Squeezed, ...]]:
@@ -1616,7 +1620,7 @@ def _bitcast_memref(
 
 def _reshape_memref(
     ref: ir.Value,
-    reshaper: ReshapeTransform,
+    reshaper: state_types.ReshapeTransform,
     ref_aval: state.AbstractRef,
     ref_block_shape: tuple[int | pallas_core.Squeezed, ...],
 ) -> tuple[ir.Value, tuple[int, ...]]:
@@ -1647,20 +1651,34 @@ def _reshape_memref(
   )
 
 
-def _transform_ref(ref, ref_ty, ref_block_shape, transforms):
+def _transform_ref(ref, ref_ty, ref_block_shape, transforms=()):
+  # Unwrap the refs if they are TransformedRefs.
+  if transforms == () and isinstance(ref, state.TransformedRef):
+    ref, transforms = _get_ref_and_transforms(ref)
+  if isinstance(ref_ty, state.TransformedRef):
+    ref_ty, _ = _get_ref_and_transforms(ref_ty)
+  if isinstance(ref_block_shape, state.TransformedRef):
+    ref_block_shape, _ = _get_ref_and_transforms(ref_block_shape)
+  assert not isinstance(ref_ty, state.TransformedRef)
+  assert not isinstance(ref_block_shape, state.TransformedRef)
   for transform in transforms:
     match transform:
       case NDIndexer():
         ref, ref_block_shape = _slice_memref(
             ref, transform, ref_ty, ref_block_shape
         )
-      case BitcastTransform():
+      case state_types.BitcastTransform():
         ref, ref_block_shape = _bitcast_memref(
             ref, transform, ref_ty, ref_block_shape
         )
-      case ReshapeTransform():
+      case state_types.ReshapeTransform():
         ref, ref_block_shape = _reshape_memref(
             ref, transform, ref_ty, ref_block_shape
+        )
+      case state_types.SelectTransform():
+        raise NotImplementedError(
+            "_transform_ref() only supports single ref transforms. Got:"
+            f" {ref = }, {ref_ty = }, {ref_block_shape = }, {transforms = }"
         )
       case _:
         raise NotImplementedError(f"Unsupported transform: {transform}")
@@ -4092,35 +4110,13 @@ def _dma_start_lowering_rule(
 ):
   if add:
     raise NotImplementedError("DMA with add=True is not supported.")
-  (
-      src_ref,
-      src_transforms,
-      dst_ref,
-      dst_transforms,
-      sem,
-      sem_transforms,
-      src_sem,
-      src_sem_transforms,
-      device_id,
-  ) = tree_util.tree_unflatten(tree, args)
-  (src_ref_aval, _, dst_ref_aval, _, sem_aval, _, src_sem_aval, _, device_id_aval) = (
-      tree_util.tree_unflatten(tree, ctx.avals_in)
+  src_ref, dst_ref, sem, src_sem, device_id = _dma_unflatten(tree, args)
+  src_ref_aval, dst_ref_aval, sem_aval, src_sem_aval, device_id_aval = (
+      _dma_unflatten(tree, ctx.avals_in)
   )
-  if src_ref_aval.dtype == jnp.bool_:
+  if any(r.dtype == jnp.bool_ for r in _dma_tree_leaves(src_ref_aval)):
     raise NotImplementedError("DMAs with bool dtypes are not supported.")
-  block_shapes = tree_util.tree_unflatten(tree, ctx.block_shapes)
-  src_ref_block_shape, dst_ref_block_shape = block_shapes[0], block_shapes[2]
-  src_ref, _ = _transform_ref(
-      src_ref, src_ref_aval, src_ref_block_shape, src_transforms
-  )
-  if src_sem is not None:
-    src_sem, _ = _transform_ref(
-        src_sem, src_sem_aval, src_sem_aval.shape, src_sem_transforms
-    )
-  dst_ref, _ = _transform_ref(
-      dst_ref, dst_ref_aval, dst_ref_block_shape, dst_transforms
-  )
-  sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, sem_transforms)
+  block_shapes = _dma_unflatten(tree, ctx.block_shapes)
   kernel_type = ctx.lowering_context.kernel_type
   if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
     dest_kernel_type = sem_aval.memory_space.core_type
@@ -4136,40 +4132,34 @@ def _dma_start_lowering_rule(
           ctx, device_id, device_id_type, device_id_aval,
           dest_kernel_type=dest_kernel_type
       )
-  tpu.enqueue_dma(
-      src_ref,
-      dst_ref,
-      sem,
-      source_semaphore=src_sem,
-      device_id=device_id,
-      core_id=core_id,
-      priority=priority,
-  )
-  return []
+
+  def _dma_start(src_ref, dst_ref, sem, src_sem) -> list[ir.Value]:
+    tpu.enqueue_dma(
+        src_ref,
+        dst_ref,
+        sem,
+        source_semaphore=src_sem,
+        device_id=device_id,
+        core_id=core_id,
+        priority=priority,
+    )
+    return []
+
+  return lower_with_transformed_refs(
+      _dma_start,
+      [src_ref, dst_ref, sem, src_sem],
+      [src_ref_aval, dst_ref_aval, sem_aval, src_sem_aval],
+      block_shapes[:4],)
 
 
 @register_lowering_rule(tpu_primitives.dma_wait_p)
 def _dma_wait_lowering_rule(ctx: LoweringRuleContext, *args, tree,
                             device_id_type: primitives.DeviceIdType):
-  (
-      src,
-      src_transforms,
-      dst,
-      transforms,
-      sem,
-      sem_transforms,
-      _,
-      _,
-      device_id,
-  ) = tree_util.tree_unflatten(tree, args)
-  (src_aval, _, dst_aval, _, sem_aval, _, _, _, device_id_aval) = tree_util.tree_unflatten(
+  src, dst, sem, _, device_id = _dma_unflatten(tree, args)
+  src_aval, dst_aval, sem_aval, _, device_id_aval = _dma_unflatten(
       tree, ctx.avals_in
   )
-  block_shapes = tree_util.tree_unflatten(tree, ctx.block_shapes)
-  ref_block_shape = block_shapes[2]
-  src, _ = _transform_ref(src, src_aval, src_aval.shape, src_transforms)
-  dst, _ = _transform_ref(dst, dst_aval, ref_block_shape, transforms)
-  sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, sem_transforms)
+  block_shapes = _dma_unflatten(tree, ctx.block_shapes)
 
   core_id = None
   if device_id is not None:
@@ -4177,11 +4167,68 @@ def _dma_wait_lowering_rule(ctx: LoweringRuleContext, *args, tree,
         ctx, device_id, device_id_type, device_id_aval
     )
 
-  if ctx.forward_compatible or ctx.is_cloud_tpu_older_than(2025, 7, 27):
-    tpu.wait_dma2(sem, src, dst, core_id=core_id)
-  else:
-    tpu.wait_dma2(sem, src, dst, device_id=device_id, core_id=core_id)
-  return []
+  def _dma_wait(src_ref, dst_ref, sem) -> list[ir.Value]:
+    if ctx.forward_compatible or ctx.is_cloud_tpu_older_than(2025, 7, 27):
+      tpu.wait_dma2(sem, src_ref, dst_ref, core_id=core_id)
+    else:
+      tpu.wait_dma2(sem, src_ref, dst_ref, device_id=device_id, core_id=core_id)
+    return []
+
+  return lower_with_transformed_refs(_dma_wait, [src, dst, sem], [src_aval, dst_aval, sem_aval], block_shapes[:3])
+
+
+def lower_with_transformed_refs(f, args, avals, block_shapes):
+  """Lower f with args as potentially nested TransformedRefs."""
+  args = list(zip(args, avals, block_shapes))
+  return _lower_transformed_refs(f, [], args)
+
+
+def _lower_transformed_refs(f, args, rest_args):
+  """Recursively iterate through TransformedRefs and lower them in the call to f."""
+  if rest_args == []:
+    return f(*args)
+  (ref, ref_ty, ref_block_shape), *rest_refs = rest_args
+
+  if not isinstance(ref, state.TransformedRef) or not ref.multiref:
+    if isinstance(ref, state.TransformedRef):
+      ref, _ = _transform_ref(ref, ref_ty, ref_block_shape)
+    return _lower_transformed_refs(f, args + [ref], rest_refs)
+
+  assert isinstance(ref.transforms[0], state_types.MultiRefTransform)
+  match ref.transforms[0]:
+    case state_types.SelectTransform(idx=idx):
+      select_options = list(zip(ref.ref, ref_ty.ref, ref_block_shape.ref))
+      return _select_to_ifop(f, args, rest_refs, cast(Any, idx), select_options)
+    case _:
+      raise ValueError(f"Unsupported transform: {ref.transforms[0]}")
+
+
+def _select_to_ifop(f, prev_refs, rest_refs, idx, options):
+  # TODO(b/502722198): Use IndexSwitchOp instead of nested IfOp if it's fixed.
+  def _in_block(ref_i, ref_i_ty, ref_i_block_shape):
+    if not isinstance(ref_i, state.TransformedRef):
+      return _lower_transformed_refs(f, prev_refs + [ref_i], rest_refs)
+    elif not ref_i.multiref:
+      ref_i, _ = _transform_ref(ref_i, ref_i_ty, ref_i_block_shape)
+      return _lower_transformed_refs(f, prev_refs + [ref_i], rest_refs)
+    # TODO(ivyzheng): Compute non-leaf ty and block_shape to support this.
+    raise NotImplementedError("Nested multirefs are not supported.")
+
+  assert len(options) >= 2
+  pred = arith.cmpi(arith.CmpIPredicate.eq, idx, ir_constant(0, idx.type))
+  if_op = scf.IfOp(pred, [], has_else=True)
+  with ir.InsertionPoint(if_op.then_block):
+    out = _in_block(*options[0])
+    scf.yield_(out)
+  assert if_op.else_block is not None
+  with ir.InsertionPoint(if_op.else_block):
+    if len(options) > 2:
+      idx = arith.subi(idx, ir_constant(1, idx.type))
+      out = _select_to_ifop(f, prev_refs, rest_refs, idx, options[1:])
+    else:
+      out = _in_block(*options[1])
+    scf.yield_(out)
+  return if_op.results
 
 
 @register_lowering_rule(lax.axis_index_p, kernel_types=[*tpu_core.CoreType])
