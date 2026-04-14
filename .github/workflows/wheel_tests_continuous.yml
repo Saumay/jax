@@ -30,7 +30,6 @@
 
 name: CI - Wheel Tests (Continuous)
 permissions:
-  id-token: write
   contents: read
   actions: read
 
@@ -46,6 +45,10 @@ concurrency:
 jobs:
   build-jax-artifact:
     uses: ./.github/workflows/build_artifacts.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     name: "Build jax artifact"
     with:
         # Note that since jax is a pure python package, the runner OS and Python values do not
@@ -57,6 +60,10 @@ jobs:
 
   build-jaxlib-artifact:
     uses: ./.github/workflows/build_artifacts.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -78,6 +85,10 @@ jobs:
 
   build-cuda-artifacts:
     uses: ./.github/workflows/build_artifacts.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -103,6 +114,10 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [build-jax-artifact, build-jaxlib-artifact]
     uses: ./.github/workflows/pytest_cpu.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -125,6 +140,10 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [build-jax-artifact, build-jaxlib-artifact, build-cuda-artifacts]
     uses: ./.github/workflows/pytest_cuda.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -164,6 +183,10 @@ jobs:
 
   run-bazel-test-cpu-py-import:
     uses: ./.github/workflows/bazel_cpu.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -186,6 +209,10 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [build-jax-artifact, build-jaxlib-artifact, build-cuda-artifacts]
     uses: ./.github/workflows/bazel_cuda.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -217,6 +244,10 @@ jobs:
     # still want to run the tests for other platforms.
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/bazel_cuda.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -246,6 +277,10 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [build-jax-artifact, build-jaxlib-artifact]
     uses: ./.github/workflows/pytest_tpu.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -274,6 +309,10 @@ jobs:
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/bazel_test_tpu.yml
     needs: [build-jaxlib-artifact]
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
@@ -331,6 +370,10 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [build-jax-artifact, build-jaxlib-artifact, build-rocm-artifacts]
     uses: ./.github/workflows/pytest_rocm.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false
         matrix:
@@ -353,6 +396,10 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [build-jax-artifact, build-jaxlib-artifact, build-rocm-artifacts]
     uses: ./.github/workflows/bazel_rocm.yml
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     strategy:
         fail-fast: false
         matrix:
