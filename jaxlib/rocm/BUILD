@@ -432,6 +432,7 @@ cc_library(
     srcs = ["//jaxlib/gpu:triton_kernels.cc"],
     hdrs = ["//jaxlib/gpu:triton_kernels.h"],
     deps = [
+        ":ffi_wrapper",
         ":hip_gpu_kernel_helpers",
         ":hip_vendor",
         ":triton_utils",
@@ -449,6 +450,7 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
+        "@xla//xla/ffi/api:ffi",
         "@xla//xla/service:custom_call_status",
         "@xla//xla/tsl/platform:env",
         "@xla//xla/tsl/platform:errors",
@@ -494,6 +496,7 @@ rocm_nanobind_extension(
         "@com_google_absl//absl/status:statusor",
         "@local_config_rocm//rocm:hip_runtime",
         "@nanobind",
+        "@xla//xla/ffi/api:ffi",
     ],
 )
 
