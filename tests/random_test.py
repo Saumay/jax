@@ -554,6 +554,49 @@ class PrngTest(jtu.JaxTestCase):
     key = make_key(42, impl=name)
     self.check_key_has_impl(key, impl)
 
+  @jtu.sample_product(name=[name for name, _ in PRNG_IMPLS])
+  def test_key_dtype(self, name):
+    self.assertEqual(random.key_dtype(name), random.key(0, impl=name).dtype)
+
+  @parameterized.parameters([
+      {'dtype_spec': "threefry2x32"},
+      {'dtype_spec': random.key_dtype("threefry2x32")},
+  ])
+  def test_key_construction_with_dtype(self, dtype_spec):
+    key = random.key(42, dtype=dtype_spec)
+    self.check_key_has_impl(key, prng_internal.prngs["threefry2x32"])
+
+  def test_key_construction_with_both_impl_and_dtype(self):
+    dtype = random.key_dtype("threefry2x32")
+    with self.assertRaisesRegex(
+        ValueError, "Cannot specify both `impl` and `dtype`"):
+      random.key(42, impl="threefry2x32", dtype=dtype)
+
+  @parameterized.parameters([
+      {"dtype_spec": "threefry2x32"},
+      {"dtype_spec": random.key_dtype("threefry2x32")},
+  ])
+  def test_wrap_key_data_with_dtype(self, dtype_spec):
+    data = jnp.zeros(2, dtype="uint32")
+    key = random.wrap_key_data(data, dtype=dtype_spec)
+    expected_dtype = (
+        dtype_spec if isinstance(dtype_spec, prng_internal.KeyTy)
+        else random.key_dtype(dtype_spec))
+    self.assertEqual(key.dtype, expected_dtype)
+
+  def test_wrap_key_data_with_both_impl_and_dtype(self):
+    dtype = random.key_dtype("threefry2x32")
+    data = jnp.zeros(2, dtype="uint32")
+    with self.assertRaisesRegex(
+        ValueError, "Cannot specify both `impl` and `dtype`"):
+      random.wrap_key_data(data, impl="threefry2x32", dtype=dtype)
+
+  def test_key_impl_deprecation(self):
+    key = random.key(0)
+    with self.assertWarnsRegex(
+        DeprecationWarning, "jax.random.key_impl is deprecated"):
+      random.key_impl(key)
+
   @parameterized.parameters([{'make_key': ctor} for ctor in KEY_CTORS])
   def test_isinstance(self, make_key):
     key = make_key(0)
@@ -964,7 +1007,7 @@ class KeyArrayTest(jtu.JaxTestCase):
     # Expected fill value is a key wrapping an array containing uint32 max.
     expected = random.wrap_key_data(
       jnp.full_like(random.key_data(keys)[0], fill_value=np.iinfo('uint32').max),
-      impl=random.key_impl(keys))
+      impl=keys.dtype)
 
     out = jax.jit(lambda x: x.at[100].get(mode='fill'))(keys)
     self.assertIsInstance(out, prng_internal.PRNGKeyArray)
@@ -1154,7 +1197,8 @@ class KeyArrayTest(jtu.JaxTestCase):
     # start by specifying the implementation by string name, then
     # round trip via whatever `key_impl` outputs
     k1 = jax.random.key(42, impl=prng_name)
-    impl = jax.random.key_impl(k1)
+    with self.assertWarnsRegex(DeprecationWarning, "jax.random.key_impl is deprecated"):
+      impl = jax.random.key_impl(k1)
     k2 = jax.random.key(42, impl=impl)
     self.assertKeysEqual(k1, k2)
     self.assertEqual(k1.dtype, k2.dtype)
@@ -1165,8 +1209,26 @@ class KeyArrayTest(jtu.JaxTestCase):
     # round trip via whatever `key_impl` outputs
     k1 = jax.random.key(42, impl=prng_name)
     data = jax.random.key_data(k1)
-    impl = jax.random.key_impl(k1)
+    with self.assertWarnsRegex(DeprecationWarning, "jax.random.key_impl is deprecated"):
+      impl = jax.random.key_impl(k1)
     k2 = jax.random.wrap_key_data(data, impl=impl)
+    self.assertKeysEqual(k1, k2)
+    self.assertEqual(k1.dtype, k2.dtype)
+
+  @jtu.sample_product(prng_name=[name for name, _ in PRNG_IMPLS])
+  def test_key_make_like_other_key_via_dtype(self, prng_name):
+    k1 = jax.random.key(42, impl=prng_name)
+    dtype = k1.dtype
+    k2 = jax.random.key(42, dtype=dtype)
+    self.assertKeysEqual(k1, k2)
+    self.assertEqual(k1.dtype, k2.dtype)
+
+  @jtu.sample_product(prng_name=[name for name, _ in PRNG_IMPLS])
+  def test_key_wrap_like_other_key_via_dtype(self, prng_name):
+    k1 = jax.random.key(42, impl=prng_name)
+    data = jax.random.key_data(k1)
+    dtype = k1.dtype
+    k2 = jax.random.wrap_key_data(data, dtype=dtype)
     self.assertKeysEqual(k1, k2)
     self.assertEqual(k1.dtype, k2.dtype)
 
@@ -1183,7 +1245,8 @@ class KeyArrayTest(jtu.JaxTestCase):
   @jtu.sample_product(name=[name for name, _ in PRNG_IMPLS])
   def test_key_impl_builtin_is_string_name(self, name):
     key = jax.random.key(42, impl=name)
-    spec = jax.random.key_impl(key)
+    with self.assertWarnsRegex(DeprecationWarning, "jax.random.key_impl is deprecated"):
+      spec = jax.random.key_impl(key)
     self.assertEqual(spec, name)
 
   def test_keyarray_custom_vjp(self):

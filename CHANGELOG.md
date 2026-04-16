@@ -16,13 +16,21 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 
 ## Unreleased
 
-* New features
+* New features:
   * Added `ResizeMethod.AREA` to {func}`jax.image.resize`, which matches
     TensorFlow's AREA resizing ({jax-issue}`#20098`).
+  * Moved RNG APIs from "implementations" to dtypes ({jax-issue}`#27854`):
+    * Added `jax.random.key_dtype` to get the dtype corresponding to a PRNG
+      implementation name.
+    * `jax.random.key` and `wrap_key_data` now accept a `dtype` argument.
 
-* Breaking changes
+* Breaking changes:
   * `with mesh:` context manager has been deprecated. Please use
     `with jax.set_mesh(mesh):` instead.
+
+* Deprecations:
+  * `jax.random.key_impl` is deprecated in favor of using `arr.dtype` directly
+    on key arrays ({jax-issue}`#27854`).
 
 ## JAX 0.10.0 (April 16, 2026)
 
