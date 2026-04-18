@@ -294,6 +294,8 @@ common:ci_linux_x86_64 --config=avx_linux --config=avx_posix
 common:ci_linux_x86_64 --config=mkl_open_source_only
 common:ci_linux_x86_64 --config=clang --verbose_failures=true
 common:ci_linux_x86_64 --color=yes
+common:ci_linux_x86_64 --repo_env=LLVM_VERSION=20
+common:ci_linux_x86_64 --repo_env=SYSROOT_DIST=linux_glibc_2_31
 
 # Deprecated CI config with non-hermetic toolchains.
 # TODO(b/356695103): We do not have a CPU only toolchain so we use the CUDA
