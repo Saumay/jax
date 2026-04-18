@@ -1366,7 +1366,7 @@ class VectorSubcoreTest(PallasSCTest):
 
     @self.vector_subcore_kernel(
         out_shape=x,
-        scratch_shapes=(pltpu.VMEM([self.num_lanes], jnp.float32) @ pltpu.CoreType.SC_VECTOR_SUBCORE,),
+        scratch_shapes=(pltpu.VMEM([self.num_lanes], jnp.float32),),
     )
     def kernel(x_ref, o_ref, scratch_ref):
       scratch_ref[...] = x_ref[...].astype(jnp.float32)
@@ -2451,9 +2451,9 @@ class MpmdMapTest(PallasSCTest):
           ),
           scratch_shapes=[
             # SCS -> TEC
-            pltpu.SemaphoreType.REGULAR(()) @ pltpu.CoreType.SC_VECTOR_SUBCORE,
+            pltpu.SemaphoreType.REGULAR(()) @ v_mesh,
             # TEC -> SCS
-            pltpu.SemaphoreType.REGULAR(()) @ pltpu.CoreType.SC_SCALAR_SUBCORE,
+            pltpu.SemaphoreType.REGULAR(()) @ s_mesh,
           ],
       )()
 
@@ -2492,8 +2492,7 @@ class MpmdMapTest(PallasSCTest):
           [(v_mesh, vector_subcore_fn), (s_mesh, scalar_subcore_fn)],
           out_shapes=jax.ShapeDtypeStruct([8], jnp.int32),
           scratch_shapes=[
-              pltpu.SemaphoreType.REGULAR(())
-              @ pltpu.CoreType.SC_VECTOR_SUBCORE,
+              pltpu.SemaphoreType.REGULAR(()) @ v_mesh
           ],
       )()
 
@@ -2508,6 +2507,49 @@ class MpmdMapTest(PallasSCTest):
     ):
       with jax.sharding.set_mesh(device_mesh):
         test_mpmd_map()
+
+  def test_async_sc_tc_prefetch_vmem(self):
+    s_mesh = plsc.ScalarSubcoreMesh(
+        axis_name="core",
+        num_cores=1,
+    )
+    tc_mesh = pltpu.create_tensorcore_mesh(axis_name="tc", num_cores=1)
+
+
+    def scalar_subcore_fn(x_ref, _, out_tc_vmem_ref, tc_sem, sem):
+      pltpu.async_remote_copy(
+          x_ref, out_tc_vmem_ref, sem, tc_sem, device_id={"tc": 0}
+      ).wait_send()
+
+    def tc_fn(x_ref, out_tc_vmem_ref, tc_sem, _):
+      pltpu.make_async_copy(x_ref, out_tc_vmem_ref, tc_sem).wait()
+      out_tc_vmem_ref[...] += 1
+
+    @jax.jit
+    def f(x):
+      x, out, sem = mpmd._mpmd_map(
+          [(s_mesh, scalar_subcore_fn)],
+          out_shapes=(
+              jax.typeof(x),
+              pltpu.VMEM(x.shape, x.dtype) @ tc_mesh,
+              pltpu.SemaphoreType.DMA @ tc_mesh,
+          ),
+          scratch_shapes=[pltpu.SemaphoreType.DMA],
+          compiler_params=pltpu.CompilerParams(
+              use_tc_tiling_on_sc=True,
+          ),
+          input_output_aliases={0: 0},
+      )(x)
+      out = mpmd._mpmd_map(
+          [(tc_mesh, tc_fn)],
+          out_shapes=jax.typeof(out),
+          input_output_aliases={1: 0},
+      )(x, out, sem)
+      return out
+
+    x = jnp.arange(8 * 128).reshape(8, 128)
+    out = f(x)
+    np.testing.assert_array_equal(out, x + 1)
 
 class PipelineTest(PallasSCTest):
 

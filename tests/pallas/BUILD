@@ -1412,6 +1412,11 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "tpu_sparsecore_pallas_test",
     srcs = ["tpu_sparsecore_pallas_test.py"],
+    args = [
+        "--xla_msa_enable=false",
+        "--xla_tpu_vmem_scavenging_mode=NONE",
+        "--xla_mosaic_unsafe_allow_multicore_remote_dma=true",
+    ],
     backend_variant_args = {
         "tpu": if_oss(
             [],

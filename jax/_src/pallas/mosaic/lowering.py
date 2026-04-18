@@ -83,11 +83,11 @@ import numpy as np
 
 NDIndexer = indexing.NDIndexer
 AnyMemorySpace = (
-    pallas_core.MemorySpace | tpu_core.MemorySpace | tpu_core.CoreMemorySpace
+    pallas_core.MemorySpace | tpu_core.MemorySpace | pallas_core.CoreMemorySpace
 )
 TPUMemorySpace = (
     tpu_core.MemorySpace
-    | tpu_core.CoreMemorySpace
+    | pallas_core.CoreMemorySpace
     | Literal[pallas_core.MemorySpace.ANY]
 )
 VMEM = tpu_core.MemorySpace.VMEM
@@ -295,9 +295,9 @@ def _memory_space_to_mosaic_attribute(
       return ir.Attribute.parse("#tpu.memory_space<any>")
     case tpu_core.MemorySpace() as ms:
       return ir.Attribute.parse(f"#tpu.memory_space<{ms}>")
-    case tpu_core.CoreMemorySpace() as cms:
+    case pallas_core.CoreMemorySpace() as cms:
       return ir.Attribute.parse(
-          f"#tpu.memory_space<{cms.memory_space}, {cms.core_type}>"
+          f"#tpu.memory_space<{cms.memory_space}, {cms.mesh.core_type}>"
       )
     case _:
       raise NotImplementedError(f"Invalid memory space: {tpu_memory_space!r}")
@@ -462,6 +462,7 @@ class MosaicGridMapping:
   scratch_block_shapes: tuple[tuple[int, ...] | None, ...]
   mesh_info: pallas_utils.MeshInfo | None
   get_grid_indices: Callable[..., Any]
+  mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh]
 
   def __init__(
       self,
@@ -471,12 +472,14 @@ class MosaicGridMapping:
       mesh: mesh_lib.Mesh | None,
       dynamic_shape_replacement_fn: DynamicShapeReplacementFn,
       kernel_type: tpu_core.CoreType,
+      mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh],
   ):
     self.grid = grid_mapping.grid
     self.grid_names = grid_mapping.grid_names
     self.jaxpr = jaxpr
     self.block_mappings = grid_mapping.block_mappings
     self.vmapped_dims = grid_mapping.vmapped_dims
+    self.mpmd_meshes = mpmd_meshes
     # TODO(mvoz): Generalize to not need this
     user_grid = tuple(
         g for i, g in enumerate(self.grid) if i not in self.vmapped_dims
@@ -601,6 +604,9 @@ class MosaicGridMapping:
           for e in jaxpr.effects
           if isinstance(e, jax_core.NamedAxisEffect)
           and (not self.grid_names or e.name not in self.grid_names)
+          and all(
+              e.name not in mesh.shape for mesh in self.mpmd_meshes.values()
+          )
       }
       # Comms effects catch the case where we have comms but don't actually have
       # a named axis effect. We can remove these once all comms primitives
@@ -827,6 +833,7 @@ def lower_jaxpr_into_module(
       mesh,
       dynamic_shape_replacement_fn,
       kernel_type,
+      mpmd_meshes,
   )
   mosaic_grid_mapping.maybe_compress_grid()
   sym_tab = ir.SymbolTable(module.operation)
@@ -839,7 +846,6 @@ def lower_jaxpr_into_module(
       dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
       dynamic_shape_replacement_enabled=dynamic_shape_replacement_enabled,
       backend=backend,
-      mpmd_meshes=mpmd_meshes,
   )
   func_op.attributes["tpu.core_type"] = ir.Attribute.parse(
       f"#tpu.core_type<{kernel_type}>"
@@ -1153,7 +1159,6 @@ def lower_jaxpr_to_func(
     backend: Any | None,
     dynamic_shape_replacement_fn: DynamicShapeReplacementFn,
     dynamic_shape_replacement_enabled: bool,
-    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh],
 ) -> func.FuncOp:
   num_grid = len(mosaic_grid_mapping.grid_types)
   num_scalar_prefetch = len(mosaic_grid_mapping.scalar_prefetch_types)
@@ -1171,7 +1176,6 @@ def lower_jaxpr_to_func(
   def body_func(*args):
     grid_indices, scalar_prefetch, operands_and_scratch = split_list(
         args, [num_grid, num_scalar_prefetch])
-    assert mpmd_meshes is not None, "mpmd_meshes must be provided."
     jaxpr_indices = mosaic_grid_mapping.get_grid_indices(
         grid_indices, maybe_include_mapped_dims=False
     )
@@ -1188,7 +1192,7 @@ def lower_jaxpr_to_func(
         forward_compatible=forward_compatible,
         backend=backend,
         dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
-        mpmd_meshes=mpmd_meshes,
+        mpmd_meshes=mosaic_grid_mapping.mpmd_meshes,
     )
     return jaxpr_subcomp(
         lowering_context, jaxpr, *scalar_prefetch, *operands_and_scratch
@@ -4055,8 +4059,8 @@ def _semaphore_signal_lowering_rule(
   )
   sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, transforms)
   kernel_type = ctx.lowering_context.kernel_type
-  if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
-    dest_kernel_type = sem_aval.memory_space.core_type
+  if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+    dest_kernel_type = sem_aval.memory_space.mesh.core_type
   else:
     dest_kernel_type = kernel_type
   if device_id is not None or dest_kernel_type != kernel_type:
@@ -4130,8 +4134,8 @@ def _dma_start_lowering_rule(
   )
   sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, sem_transforms)
   kernel_type = ctx.lowering_context.kernel_type
-  if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
-    dest_kernel_type = sem_aval.memory_space.core_type
+  if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+    dest_kernel_type = sem_aval.memory_space.mesh.core_type
   else:
     dest_kernel_type = kernel_type
   core_id = None

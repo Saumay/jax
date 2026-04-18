@@ -56,7 +56,7 @@ zip, unsafe_zip = util.safe_zip, zip
 
 
 MemorySpace = tpu_core.MemorySpace
-CoreMemorySpace = tpu_core.CoreMemorySpace
+CoreMemorySpace = pallas_core.CoreMemorySpace
 
 ShapedAbstractValue = tc_lowering.ShapedAbstractValue
 
@@ -390,6 +390,7 @@ def lower_jaxpr_into_module(
       dimension_semantics,
       mesh=mesh,
       kernel_type=kernel_type,
+      mpmd_meshes=mpmd_meshes,
   )
   sym_tab = ir.SymbolTable(module.operation)
   func_op = lower_jaxpr_to_func(
@@ -399,7 +400,6 @@ def lower_jaxpr_into_module(
       mosaic_grid_mapping=mosaic_grid_mapping,
       forward_compatible=lowering_context.is_forward_compat(),
       backend=backend,
-      mpmd_meshes=mpmd_meshes,
       needs_layout_passes=needs_layout_passes,
   )
   module.body.append(func_op)
@@ -454,6 +454,7 @@ class MosaicGridMapping(tc_lowering.MosaicGridMapping):
       dimension_semantics: Sequence[tpu_core.DimensionSemantics] | None,
       mesh: mesh_lib.Mesh | None,
       kernel_type: tpu_core.CoreType,
+      mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh],
   ):
     if any(
         isinstance(var.aval, sc_core.AbstractRef)
@@ -471,6 +472,7 @@ class MosaicGridMapping(tc_lowering.MosaicGridMapping):
         mesh,
         dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
         kernel_type=kernel_type,
+        mpmd_meshes=mpmd_meshes,
     )
 
 
@@ -482,11 +484,9 @@ def lower_jaxpr_to_func(
     mosaic_grid_mapping: MosaicGridMapping,
     forward_compatible: bool,
     backend: Any | None,
-    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh] | None = None,
     needs_layout_passes: bool = False,
 ) -> func.FuncOp:
   """Lowers a Jaxpr to a Mosaic SparseCore function."""
-  assert mpmd_meshes is not None, "mpmd_meshes must be provided."
   num_grid = len(mosaic_grid_mapping.grid_types)
   num_scalar_prefetch = len(mosaic_grid_mapping.scalar_prefetch_types)
   if num_scalar_prefetch:
@@ -529,7 +529,7 @@ def lower_jaxpr_to_func(
         forward_compatible=forward_compatible,
         backend=backend,
         dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
-        mpmd_meshes=mpmd_meshes,
+        mpmd_meshes=mosaic_grid_mapping.mpmd_meshes,
         needs_layout_passes=needs_layout_passes,
     )
     return tc_lowering.jaxpr_subcomp(
@@ -968,9 +968,16 @@ def _dma_start_lowering_rule(
 
   # If not ``None``, we lower to an indirect DMA instead.
   if indirect_offsets is None:
+    core_index = None
     if device_id is not None:
-      device_id, _ = tc_lowering._device_id_to_logical(
-          ctx, device_id, device_id_type, device_id_aval
+      kernel_type = ctx.lowering_context.kernel_type
+      if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+        dest_kernel_type = sem_aval.memory_space.mesh.core_type
+      else:
+        dest_kernel_type = kernel_type
+      device_id, core_index = tc_lowering._device_id_to_logical(
+          ctx, device_id, device_id_type, device_id_aval,
+          dest_kernel_type
       )
     tpu.enqueue_dma(
         src_ref,
@@ -979,6 +986,7 @@ def _dma_start_lowering_rule(
         source_semaphore=src_sem,
         device_id=device_id,
         priority=priority,
+        core_id=core_index,
     )
     return []
 
@@ -1008,8 +1016,8 @@ def _dma_wait_lowering_rule(
       dst_transforms,
       sem,
       sem_transforms,
-      _,
-      _,
+      src_sem,
+      src_sem_transforms,
       device_id,
   ) = tpu_primitives._dma_unflatten(tree, args)
   (
@@ -1019,7 +1027,7 @@ def _dma_wait_lowering_rule(
       dst_transforms_aval,
       sem_aval,
       _,
-      _,
+      src_sem_aval,
       _,
       device_id_aval,
   ) = tpu_primitives._dma_unflatten(tree, ctx.avals_in)
@@ -1039,11 +1047,7 @@ def _dma_wait_lowering_rule(
 
   # If not ``None``, we lower to an indirect DMA instead of a regular DMA.
   if indirect_offsets is None:
-    if device_id is not None:
-      device_id, _ = tc_lowering._device_id_to_logical(
-          ctx, device_id, device_id_type, device_id_aval
-      )
-    tpu.wait_dma2(sem, src_ref, dst_ref, device_id=device_id)
+    tpu.wait_dma2(sem, src_ref, dst_ref)
     return []
 
   if device_id is not None:
