@@ -1964,6 +1964,26 @@ class VectorSubcoreTest(PallasSCTest):
 
     np.testing.assert_array_equal(kernel(x, indices), x[indices])
 
+  @parameterized.product(dim=[0, 1, 2], dtype=[np.int32, np.float32])
+  def test_take_along_axis(self, dim, dtype):
+    shape = (2, 8, 64)
+    key = jax.random.key(1234)
+    x = np.arange(math.prod(shape), dtype=dtype).reshape(shape)
+    indices = jax.random.randint(key, shape, 0, shape[dim], dtype=np.int32)
+
+    @self.vector_subcore_kernel(
+        out_shape=x,
+        compiler_params=pltpu.CompilerParams(needs_layout_passes=True),
+    )
+    def kernel(x_ref, indices_ref, out_ref):
+      out_ref[...] = jnp.take_along_axis(
+          x_ref[...], indices_ref[...], axis=dim, mode="promise_in_bounds"
+      )
+
+    np.testing.assert_array_equal(
+        kernel(x, indices), jnp.take_along_axis(x, indices, axis=dim)
+    )
+
   @parameterized.product(
       keys_dtype=[np.uint32, np.int32, np.float32],
       values_dtype=[np.int32, np.float32],
