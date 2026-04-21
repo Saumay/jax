@@ -83,11 +83,11 @@ import numpy as np
 
 NDIndexer = indexing.NDIndexer
 AnyMemorySpace = (
-    pallas_core.MemorySpace | tpu_core.MemorySpace | tpu_core.CoreMemorySpace
+    pallas_core.MemorySpace | tpu_core.MemorySpace | pallas_core.CoreMemorySpace
 )
 TPUMemorySpace = (
     tpu_core.MemorySpace
-    | tpu_core.CoreMemorySpace
+    | pallas_core.CoreMemorySpace
     | Literal[pallas_core.MemorySpace.ANY]
 )
 VMEM = tpu_core.MemorySpace.VMEM
@@ -298,9 +298,9 @@ def _memory_space_to_mosaic_attribute(
       return ir.Attribute.parse("#tpu.memory_space<any>")
     case tpu_core.MemorySpace() as ms:
       return ir.Attribute.parse(f"#tpu.memory_space<{ms}>")
-    case tpu_core.CoreMemorySpace() as cms:
+    case pallas_core.CoreMemorySpace() as cms:
       return ir.Attribute.parse(
-          f"#tpu.memory_space<{cms.memory_space}, {cms.core_type}>"
+          f"#tpu.memory_space<{cms.memory_space}, {cms.mesh.core_type}>"
       )
     case _:
       raise NotImplementedError(f"Invalid memory space: {tpu_memory_space!r}")
@@ -4070,8 +4070,8 @@ def _semaphore_signal_lowering_rule(
   )
   sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, transforms)
   kernel_type = ctx.lowering_context.kernel_type
-  if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
-    dest_kernel_type = sem_aval.memory_space.core_type
+  if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+    dest_kernel_type = sem_aval.memory_space.mesh.core_type
   else:
     dest_kernel_type = kernel_type
   if device_id is not None or dest_kernel_type != kernel_type:
@@ -4128,8 +4128,8 @@ def _dma_start_lowering_rule(
   dst_ref, _ = _transform_ref(dst_ref, dst_ref_aval, block_shapes[1])
   sem, _ = _transform_ref(sem, sem_aval, block_shapes[2])
   kernel_type = ctx.lowering_context.kernel_type
-  if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
-    dest_kernel_type = sem_aval.memory_space.core_type
+  if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+    dest_kernel_type = sem_aval.memory_space.mesh.core_type
   else:
     dest_kernel_type = kernel_type
   core_id = None
