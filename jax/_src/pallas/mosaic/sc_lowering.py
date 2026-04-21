@@ -55,7 +55,7 @@ zip, unsafe_zip = util.safe_zip, zip
 
 
 MemorySpace = tpu_core.MemorySpace
-CoreMemorySpace = tpu_core.CoreMemorySpace
+CoreMemorySpace = pallas_core.CoreMemorySpace
 
 ShapedAbstractValue = tc_lowering.ShapedAbstractValue
 
@@ -982,6 +982,7 @@ def _dma_wait_lowering_rule(
     *args,
     tree,
     device_id_type: pallas_primitives.DeviceIdType,
+    is_remote: bool,
 ):
   src_ref, dst_ref, sem, _, device_id = _dma_unflatten(
       tree, args
@@ -1002,8 +1003,11 @@ def _dma_wait_lowering_rule(
 
   # If not ``None``, we lower to an indirect DMA instead of a regular DMA.
   if indirect_offsets is None:
-    if device_id is not None:
-      device_id, _ = tc_lowering._device_id_to_logical(
+    if is_remote:
+      i32 = ir.IntegerType.get_signless(32)
+      core_id = device_id = arith.constant(i32, ir.IntegerAttr.get(i32, 0))
+    elif device_id is not None:
+      device_id, core_id = tc_lowering._device_id_to_logical(
           ctx, device_id, device_id_type, device_id_aval
       )
     tpu.wait_dma2(sem, src_ref, dst_ref, device_id=device_id)

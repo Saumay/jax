@@ -83,11 +83,11 @@ import numpy as np
 
 NDIndexer = indexing.NDIndexer
 AnyMemorySpace = (
-    pallas_core.MemorySpace | tpu_core.MemorySpace | tpu_core.CoreMemorySpace
+    pallas_core.MemorySpace | tpu_core.MemorySpace | pallas_core.CoreMemorySpace
 )
 TPUMemorySpace = (
     tpu_core.MemorySpace
-    | tpu_core.CoreMemorySpace
+    | pallas_core.CoreMemorySpace
     | Literal[pallas_core.MemorySpace.ANY]
 )
 VMEM = tpu_core.MemorySpace.VMEM
@@ -298,9 +298,9 @@ def _memory_space_to_mosaic_attribute(
       return ir.Attribute.parse("#tpu.memory_space<any>")
     case tpu_core.MemorySpace() as ms:
       return ir.Attribute.parse(f"#tpu.memory_space<{ms}>")
-    case tpu_core.CoreMemorySpace() as cms:
+    case pallas_core.CoreMemorySpace() as cms:
       return ir.Attribute.parse(
-          f"#tpu.memory_space<{cms.memory_space}, {cms.core_type}>"
+          f"#tpu.memory_space<{cms.memory_space}, {cms.mesh.core_type}>"
       )
     case _:
       raise NotImplementedError(f"Invalid memory space: {tpu_memory_space!r}")
@@ -4070,8 +4070,8 @@ def _semaphore_signal_lowering_rule(
   )
   sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, transforms)
   kernel_type = ctx.lowering_context.kernel_type
-  if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
-    dest_kernel_type = sem_aval.memory_space.core_type
+  if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+    dest_kernel_type = sem_aval.memory_space.mesh.core_type
   else:
     dest_kernel_type = kernel_type
   if device_id is not None or dest_kernel_type != kernel_type:
@@ -4128,8 +4128,8 @@ def _dma_start_lowering_rule(
   dst_ref, _ = _transform_ref(dst_ref, dst_ref_aval, block_shapes[1])
   sem, _ = _transform_ref(sem, sem_aval, block_shapes[2])
   kernel_type = ctx.lowering_context.kernel_type
-  if isinstance(sem_aval.memory_space, tpu_core.CoreMemorySpace):
-    dest_kernel_type = sem_aval.memory_space.core_type
+  if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+    dest_kernel_type = sem_aval.memory_space.mesh.core_type
   else:
     dest_kernel_type = kernel_type
   core_id = None
@@ -4156,7 +4156,8 @@ def _dma_start_lowering_rule(
 
 @register_lowering_rule(tpu_primitives.dma_wait_p)
 def _dma_wait_lowering_rule(ctx: LoweringRuleContext, *args, tree,
-                            device_id_type: primitives.DeviceIdType):
+                            device_id_type: primitives.DeviceIdType,
+                            is_remote: bool):
   src, dst, sem, _, device_id = _dma_unflatten(tree, args)
   src_aval, dst_aval, sem_aval, _, device_id_aval = _dma_unflatten(
       tree, ctx.avals_in
@@ -4167,11 +4168,15 @@ def _dma_wait_lowering_rule(ctx: LoweringRuleContext, *args, tree,
   dst, _ = _transform_ref(dst, dst_aval, block_shapes[1])
   sem, _ = _transform_ref(sem, sem_aval, block_shapes[2])
 
-  core_id = None
-  if device_id is not None:
+  if is_remote:
+    i32 = ir.IntegerType.get_signless(32)
+    device_id = core_id = arith.constant(i32, ir.IntegerAttr.get(i32, 0))
+  elif device_id is not None:
     device_id, core_id = _device_id_to_logical(
         ctx, device_id, device_id_type, device_id_aval
     )
+  else:
+    core_id = None
 
   if ctx.forward_compatible or ctx.is_cloud_tpu_older_than(2025, 7, 27):
     tpu.wait_dma2(sem, src, dst, core_id=core_id)
